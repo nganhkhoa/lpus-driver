@@ -111,17 +111,30 @@ DriverEntry(
 
         // seems like this shellcode is wrong for Windows insider Feb 2020 upgrade
         // shellcode: https://gist.github.com/Barakat/34e9924217ed81fd78c9c92d746ec9c6
-        static const UCHAR shellcode[] = {
-            0x65, 0x48, 0x8B, 0x04, 0x25, 0x38, 0x00, 0x00, 0x00, 0xB9, 0x4D, 0x5A, 0x00, 0x00, 0x48, 0x8B,
-            0x40, 0x04, 0x48, 0x25, 0x00, 0xF0, 0xFF, 0xFF, 0xEB, 0x06, 0x48, 0x2D, 0x00, 0x10, 0x00, 0x00,
-            0x66, 0x39, 0x08, 0x75, 0xF5, 0xC3
-        };
-        const auto shellPool = ExAllocatePoolWithTag(NonPagedPoolExecute, sizeof(getNtoskrnlBaseShellcode), 'NakD');
-        RtlCopyMemory(shellPool, getNtoskrnlBaseShellcode, sizeof(getNtoskrnlBaseShellcode));
-        const auto get_ntoskrnl_base_address = reinterpret_cast<void *(*)()>(shellPool);
-        PVOID ntosbase = get_ntoskrnl_base_address();
+        // shellcode is useless in Windows internal 2020
+        // static const UCHAR getNtoskrnlBaseShellcode[] = {
+        //     0x65, 0x48, 0x8B, 0x04, 0x25, 0x38, 0x00, 0x00, 0x00, 0xB9, 0x4D, 0x5A, 0x00, 0x00, 0x48, 0x8B,
+        //     0x40, 0x04, 0x48, 0x25, 0x00, 0xF0, 0xFF, 0xFF, 0xEB, 0x06, 0x48, 0x2D, 0x00, 0x10, 0x00, 0x00,
+        //     0x66, 0x39, 0x08, 0x75, 0xF5, 0xC3
+        // };
+        // const auto shellPool = ExAllocatePoolWithTag(NonPagedPoolExecute, sizeof(getNtoskrnlBaseShellcode), 'NakD');
+        // RtlCopyMemory(shellPool, getNtoskrnlBaseShellcode, sizeof(getNtoskrnlBaseShellcode));
+        // const auto get_ntoskrnl_base_address = reinterpret_cast<void *(*)()>(shellPool);
+        // PVOID ntosbase = get_ntoskrnl_base_address();
+
+        // IoGetCurrentProcess -> PEPROCESS -> ActiveProcessLinks -> FLINK until ImageFileName == "ntoskrnl.exe", get Peb->ImageBaseAddress
+        // because this is driver, so it will return the System, as the system loads the driver
+        // system is the first key in ProcessLinks so go back to get the PsActiveProcessHead
+        // minus the offset from pdb to get the ntoskrnl
+
+        PVOID eprocess = (PVOID)IoGetCurrentProcess();
+        DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n", eprocess, (char*)((ULONG64)eprocess + 0x5a8));
+        PVOID processHead = (PVOID)(*(ULONG64*)((ULONG64)eprocess + 0x448 + 0x8));
+        DbgPrint("[NAK] :: [ ] PsActiveProcessHead    : 0x%p\n", processHead);
+        PVOID ntosbase = (PVOID)((ULONG64)processHead - 0xc1f970);
         DbgPrint("[NAK] :: [ ] ntoskrnl.exe           : 0x%p\n", ntosbase);
-        ExFreePoolWithTag(shellPool, 'NakD');
+
+        // ExFreePoolWithTag(shellPool, 'NakD');
 
         // parsing PE file
         // https://stackoverflow.com/a/4316804
@@ -149,22 +162,21 @@ DriverEntry(
         // +0x070 SystemNodeInformation : 0xffffe58f`9283b050 _MI_SYSTEM_NODE_INFORMATION
 
         PVOID miState = (PVOID)((ULONG64)ntosbase + 0xc4f200);
-        _MI_SYSTEM_NODE_NONPAGED_POOL* systemNonPageInfo =
-            (_MI_SYSTEM_NODE_NONPAGED_POOL*)((ULONG64)miState + 0x1580 + 0x20);
-        DbgPrint("[NAK] :: [ ] MiState                : 0x%p\n", miState);
-        DbgPrint("[NAK] :: [ ] systemNonPageInfo      : 0x%p\n", systemNonPageInfo);
-        DbgPrint("[NAK] :: [ ] NonPagedPoolFirstVa    : 0x%p\n", systemNonPageInfo->NonPagedPoolFirstVa);
-        DbgPrint("[NAK] :: [ ] NonPagedPoolLastVa     : 0x%p\n", systemNonPageInfo->NonPagedPoolLastVa);
-        // nonPagedPoolStart = *(ULONG64*)(systemNonPageInfo->NonPagedPoolFirstVa);
-        // nonPagedPoolEnd = *(ULONG64*)(systemNonPageInfo->NonPagedPoolLastVa);
+        PVOID systemNonPageInfo = (PVOID)*(ULONG64*)((ULONG64)miState + 0x1580 + 0x20);
+        DbgPrint("[NAK] :: [ ] nt!MiState             : 0x%p\n", miState);
+        DbgPrint("[NAK] :: [ ] &systemNonPageInfo     : 0x%p\n", systemNonPageInfo);
+        DbgPrint("[NAK] :: [ ] &NonPagedPoolFirstVa   : 0x%p\n", (ULONG64*)((ULONG64)systemNonPageInfo + 0x60));
+        DbgPrint("[NAK] :: [ ] &NonPagedPoolLastVa    : 0x%p\n", (ULONG64*)((ULONG64)systemNonPageInfo + 0x68));
+        nonPagedPoolStart = *(ULONG64*)((ULONG64)systemNonPageInfo + 0x60);
+        nonPagedPoolEnd = *(ULONG64*)((ULONG64)systemNonPageInfo + 0x68);
     } else {
         // x32 windows, KdVersionBlock get is usable
         DbgPrint("[NAK] :: [ ] Successfully get KdVersionBlock, not sure whether this works\n");
         // dbgBlock = (PKDDEBUGGER_DATA64) ((PLIST_ENTRY)kdVersionBlock->DebuggerDataList)->Flink;
     }
 
-    DbgPrint("[NAK] :: [ ] MmNonPagedPoolStart    : 0x%llx\n", nonPagedPoolStart);
-    DbgPrint("[NAK] :: [ ] MmNonPagedPoolEnd      : 0x%llx\n", nonPagedPoolEnd);
+    DbgPrint("[NAK] :: [ ] nonPagedPoolStart      : 0x%llx\n", nonPagedPoolStart);
+    DbgPrint("[NAK] :: [ ] nonPagedPoolEnd        : 0x%llx\n", nonPagedPoolEnd);
 
     // now wait for user call to scan
     // current debug mode, scan now
