@@ -1,0 +1,24 @@
+00000001	0.00000000	[NAK] :: [ ] Hello from Kernel, setup a few things
+00000002	0.00001790	[NAK] :: [+] Setup completed, GO GO GO !!!!
+00000003	0.00003500	[NAK] :: [ ] Windows version        : 10.0.19564
+00000004	0.00003650	[NAK] :: [ ] Detected windows       : 2020 Fast Ring
+00000005	0.00003880	[NAK] :: [ ] eprocess               : 0xFFFFB0078D8BE040, [         System]
+00000006	0.00004050	[NAK] :: [ ] PsActiveProcessHead    : 0xFFFFF80465E1F970
+00000007	0.00004200	[NAK] :: [ ] ntoskrnl.exe           : 0xFFFFF80465200000
+00000008	0.00004350	[NAK] :: [ ] nt!MiState             : 0xFFFFF80465E4F200
+00000009	0.00004500	[NAK] :: [ ] &systemNonPageInfo     : 0xFFFFD10180016010
+00000010	0.00004640	[NAK] :: [ ] &NonPagedPoolFirstVa   : 0xFFFFD10180016070
+00000011	0.00004790	[NAK] :: [ ] &NonPagedPoolLastVa    : 0xFFFFD10180016078
+00000012	0.00004970	[NAK] :: [+] nonPagedPoolStart      : 0xffffb00000000000
+00000013	0.00005130	[NAK] :: [+] nonPagedPoolEnd        : 0xffffc00000000000
+00000014	0.00005230	[NAK] :: [+] Scanning
+00000015	0.08150540	[NAK] :: [+] ==== PoolStart 0xFFFFB0078D8BE000 ====
+00000016	0.08150930	[NAK] :: [|]  PreviousSize  : 0x0
+00000017	0.08151110	[NAK] :: [|]  PoolIndex     : 0xfb
+00000018	0.08151260	[NAK] :: [|]  BlockSize     : 0xf00
+00000019	0.08151400	[NAK] :: [|]  PoolType      : 0x2
+00000020	0.08151630	[NAK] :: [|]  PoolTag       : 0x636f7250 [Proc]
+00000021	0.08151850	[NAK] :: [+] ==== PoolEnd   0xFFFFB0078D8BE000 ====
+00000022	0.08152020	[NAK] :: [+] HEY EPROCESS POOL CHUNK
+00000023	0.08152160	[NAK] :: [+] Finish scanning
+00000024	2.03572369	[NAK] :: [+] Goodbye from Kernel
