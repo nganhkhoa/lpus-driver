@@ -1,6 +1,7 @@
 #include <ntddk.h>
 #include <wdf.h>
 #include <ntdef.h>
+#include <ntstrsafe.h>
 
 #include "sioctl.h"
 #include "Driver.h"
@@ -20,6 +21,19 @@ extern "C" DRIVER_UNLOAD UnloadRoutine;
 #define POOL_HEADER_SIZE 0x10 // windows 10
 #define CHUNK_SIZE 16         // 64 bit
 // #define PAGE_SIZE 4096        // 4KB
+
+// offset to get from PDB file
+ULONG64 eprocessNameOffset = 0;
+ULONG64 eprocessLinkOffset = 0;
+ULONG64 listBLinkOffset = 0;
+ULONG64 processHeadOffset = 0;
+ULONG64 miStateOffset = 0;
+ULONG64 hardwareOffset = 0;
+ULONG64 systemNodeOffset = 0;
+ULONG64 firstVaOffset = 0;
+ULONG64 lastVaOffset = 0;
+ULONG64 largePageTableOffset = 0;
+ULONG64 largePageSizeOffset = 0;
 
 NTSTATUS
 DriverEntry(
@@ -69,18 +83,9 @@ DriverEntry(
 
     // https://en.wikipedia.org/wiki/Windows_10_version_history
     VERSION_BY_POOL windowsVersionByPool = WINDOWS_NOT_SUPPORTED;
-    // TODO: automatically get from parsed PDB file
-    ULONG64 eprocessNameOffset = 0;
-    ULONG64 eprocessLinkOffset = 0;
-    ULONG64 listBLinkOffset = 0;
-    ULONG64 processHeadOffset = 0;
-    ULONG64 miStateOffset = 0;
-    ULONG64 hardwareOffset = 0;
-    ULONG64 systemNodeOffset = 0;
-    ULONG64 firstVaOffset = 0;
-    ULONG64 lastVaOffset = 0;
 
-    // setup offset
+    // TODO: Move this to front-end for portable update
+    // TODO: automatically get from parsed PDB file
     if (windowsVersionInfo.dwBuildNumber == 17134 || windowsVersionInfo.dwBuildNumber == 17763) {
         DbgPrint("[NAK] :: [ ] Detected windows       : 2018\n");
         windowsVersionByPool = WINDOWS_2018;
@@ -105,6 +110,8 @@ DriverEntry(
         systemNodeOffset = 0x20;
         firstVaOffset = 0x60;
         lastVaOffset = 0x68;
+        largePageTableOffset = 0xc17ed8;
+        largePageSizeOffset = 0xc17ed0;
     }
 
     if (windowsVersionByPool == WINDOWS_NOT_SUPPORTED) {
@@ -138,11 +145,17 @@ DriverEntry(
 
     // TODO: Exception?????
     PVOID eprocess = (PVOID)IoGetCurrentProcess();
-    DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n", eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+    DbgPrint("[NAK] :: [ ] System eprocess        : 0x%p, [%15s]\n", eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
     PVOID processHead = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset + listBLinkOffset));
     DbgPrint("[NAK] :: [ ] PsActiveProcessHead    : 0x%p\n", processHead);
     PVOID ntosbase = (PVOID)((ULONG64)processHead - processHeadOffset);
     DbgPrint("[NAK] :: [ ] ntoskrnl.exe           : 0x%p\n", ntosbase);
+
+    DbgPrint("[NAK] :: [ ] Scan the PsActiveProcessHead linked-list\n");
+    while (*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) != (ULONG64)processHead) {
+        eprocess = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) - eprocessLinkOffset);
+        DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n", eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+    }
 
     // TODO: Check if ntosbase is a PE, and the name is ntoskrnl.exe
     // https://stackoverflow.com/a/4316804
@@ -174,6 +187,15 @@ DriverEntry(
      * +0x068 NonPagedPoolLastVa : 0xfffff580`00000000 Void
      * +0x070 SystemNodeInformation : 0xffffe58f`9283b050 _MI_SYSTEM_NODE_INFORMATION
      *
+     * The big page pool is denoted by two variables `PoolBigPageTable.Va` and `PoolBigPageTableSize`
+     * It seems that this big page is inside NonPagedPool range
+     *
+     * PoolBigPageTable is an array with PoolBigPageTableSize elements, where
+     * each elements has:
+     * Va -> Address of the allocation
+     * Key -> Pool tag
+     * NumberOfBytes -> Size
+     *
      **/
 
     PVOID miState = (PVOID)((ULONG64)ntosbase + miStateOffset);
@@ -182,7 +204,14 @@ DriverEntry(
 
     ULONG64 nonPagedPoolStart = 0;
     ULONG64 nonPagedPoolEnd = 0;
+    PVOID largePageTableArray = 0;
+    ULONG64 largePageTableSize = 0;
 
+    largePageTableArray = (PVOID)((ULONG64)ntosbase + largePageTableOffset);
+    largePageTableSize = *(ULONG64*)((ULONG64)ntosbase + largePageSizeOffset);
+
+
+    // TODO: Move this to front-end for portable update
     // use defined formula by windows build number to get those two values
     switch (windowsVersionByPool) {
         case WINDOWS_2020_FASTRING:
@@ -199,8 +228,11 @@ DriverEntry(
 
     DbgPrint("[NAK] :: [+] nonPagedPoolStart      : 0x%llx\n", nonPagedPoolStart);
     DbgPrint("[NAK] :: [+] nonPagedPoolEnd        : 0x%llx\n", nonPagedPoolEnd);
+    DbgPrint("[NAK] :: [+] large page address     : 0x%p\n", largePageTableArray);
+    DbgPrint("[NAK] :: [+] large page size        : 0x%llx\n", largePageTableSize);
 
-    scan(nonPagedPoolStart, nonPagedPoolEnd);
+    scanNormalPool(nonPagedPoolStart, nonPagedPoolEnd);
+    scanLargePool(largePageTableArray, largePageTableSize);
 
     return returnStatus;
 }
@@ -254,13 +286,18 @@ validTag(PPOOL_HEADER p) {
 }
 
 bool
-checkValidPool(PPOOL_HEADER /* p */) {
+validPool(PPOOL_HEADER p) {
     // https://subs.emis.de/LNI/Proceedings/Proceedings97/GI-Proceedings-97-9.pdf
     // long long int offsetInPage = (long long int)p->addr % PAGE_SIZE;   // OffsetInPage = addr % pagesize
     // (offsetInPage % CHUNK_SIZE == 0) &&       // rule 1
     // (p->blockSize > 0) &&             // rule 2
     // (p->blockSize * CHUNK_SIZE + offsetInPage == PAGE_SIZE) &&  // rule 3
     // (p->prevBlockSize * CHUNK_SIZE <= offsetInPage) // rule 5
+    if ((p->blockSize * CHUNK_SIZE)< 0xb00 + 0x10 || // eprocess size + pool_header size
+        // p->poolType % 2 != 0 || // pool tag must be even number aka nonpaged
+        p->poolType != 2     // force to search for nonpaged pool only aka poolType == 2
+       )
+        return false;
     return true;
 }
 
@@ -271,12 +308,12 @@ printChunkInfo(PPOOL_HEADER p) {
     DbgPrint("[NAK] :: [|] \tPoolIndex     : 0x%x\n", p->poolIndex);
     DbgPrint("[NAK] :: [|] \tBlockSize     : 0x%x\n", p->blockSize * CHUNK_SIZE);
     DbgPrint("[NAK] :: [|] \tPoolType      : 0x%x\n", p->poolType);
-    DbgPrint("[NAK] :: [|] \tPoolTag       : 0x%lx [%c%c%c%c]\n", p->tag, p->tag, p->tag >> 8, p->tag >> 16, p->tag >> 24);
+    DbgPrint("[NAK] :: [|] \tPoolTag       : 0x%lx [%4s]\n", p->tag, p->tag);
     DbgPrint("[NAK] :: [+] ==== PoolEnd   0x%p ====\n", p->addr);
 }
 
 VOID
-scan(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
+scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
     DbgPrint("[NAK] :: [+] Scanning\n");
 
     /*
@@ -295,6 +332,8 @@ scan(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
      **/
 
     POOL_HEADER p;
+    PVOID eprocess;
+    char eprocess_name[16] = {0}; // eprocess name is 15 bytes + 1 null
     const ULONG64 headerSize = 0x10;
     PVOID currentAddr = (PVOID)(nonPagedPoolStart);
     while (true) {
@@ -327,6 +366,7 @@ scan(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
 
         if (p.tag == 0) continue;
         if (!validTag(&p)) continue;
+        if (!validPool(&p)) continue;
 
         if (p.tag != 'Proc' && p.tag != 'corP')
             continue;
@@ -334,10 +374,19 @@ scan(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
         // TODO: Parse data as _EPROCESS
         // The first Proc found seems to be the EPROCESS from IoGetCurrentProcess
         // But it was offset 0x40
-        printChunkInfo(&p);
-        DbgPrint("[NAK] :: [+] HEY EPROCESS POOL CHUNK");
-        break;
+        // printChunkInfo(&p);
+        // eprocess = (PVOID)((ULONG64)p.addr + 0x40);
+        // RtlStringCbCopyNA(eprocess_name, 16, (char*)((ULONG64)eprocess + eprocessNameOffset), 15);
+        // DbgPrint("[NAK] :: [ ] eprocess offset 0x40   : 0x%p, [%s]\n", eprocess, eprocess_name);
+        eprocess = (PVOID)((ULONG64)p.addr + 0x80);
+        RtlStringCbCopyNA(eprocess_name, 16, (char*)((ULONG64)eprocess + eprocessNameOffset), 15);
+        DbgPrint("[NAK] :: [ ] eprocess offset 0x80   : 0x%p, [%s]\n", eprocess, eprocess_name);
     }
 
     DbgPrint("[NAK] :: [+] Finish scanning");
+}
+
+VOID
+scanLargePool(PVOID /* largePageTableArray */, ULONG64 /* largePageTableSize */) {
+    DbgPrint("[NAK] :: [-] Scan large pool not supported yet");
 }

@@ -28,12 +28,15 @@ bool
 validTag(PPOOL_HEADER p);
 
 bool
-checkValidPool(PPOOL_HEADER p);
+validPool(PPOOL_HEADER p);
 
 VOID
 printChunkInfo(PPOOL_HEADER p);
 
 VOID
-scan(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd);
+scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd);
+
+VOID
+scanLargePool(PVOID largePageTableArray, ULONG64 largePageTableSize);
 
 #endif
