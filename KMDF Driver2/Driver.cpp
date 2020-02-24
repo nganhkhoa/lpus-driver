@@ -5,10 +5,12 @@
 
 #include "sioctl.h"
 #include "Driver.h"
-// #include "peformat.h"
+#include "simplewsk.h"
 
 extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" DRIVER_UNLOAD UnloadRoutine;
+extern "C" DRIVER_DISPATCH DriverCreateClose;
+extern "C" DRIVER_DISPATCH DriverControl;
 // extern "C" PDBGKD_GET_VERSION64 FindKdVersionBlock(void);
 
 #define NT_DEVICE_NAME      L"\\Device\\poolscanner"
@@ -36,6 +38,49 @@ ULONG64 largePageTableOffset = 0;
 ULONG64 largePageSizeOffset = 0;
 
 NTSTATUS
+DriverCreateClose(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
+    PAGED_CODE();
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
+    PIO_STACK_LOCATION irpSp;
+    NTSTATUS ntStatus = STATUS_SUCCESS;
+    // ULONG inBufLength;
+    // ULONG outBufLength;
+    ULONG controlCode;
+    // PCHAR inBuf;
+    // PCHAR outBuf;
+
+    PAGED_CODE();
+
+    irpSp = IoGetCurrentIrpStackLocation(Irp);
+    /*
+     *  struct {
+     *    ULONG                   OutputBufferLength;
+     *    ULONG POINTER_ALIGNMENT InputBufferLength;
+     *    ULONG POINTER_ALIGNMENT IoControlCode;
+     *    PVOID                   Type3InputBuffer;
+     *  } DeviceIoControl;
+     **/
+    controlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
+
+    DbgPrint("[NAK] :: [ ] Control Code           : %lu\n", controlCode);
+
+
+    Irp->IoStatus.Status = ntStatus;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return ntStatus;
+}
+
+NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT     DriverObject,
     _In_ PUNICODE_STRING    /* RegistryPath */
@@ -47,7 +92,6 @@ DriverEntry(
     UNICODE_STRING ntWin32NameString;
     PDEVICE_OBJECT  deviceObject = nullptr;
 
-    DriverObject->DriverUnload = UnloadRoutine;
     RtlInitUnicodeString(&ntUnicodeString, NT_DEVICE_NAME);
     returnStatus = IoCreateDevice(
         DriverObject,                   // Our Driver Object
@@ -62,7 +106,10 @@ DriverEntry(
         return returnStatus;
     }
 
-    DbgPrint("[NAK] :: [+] Setup completed, GO GO GO !!!!\n");
+    DriverObject->DriverUnload = UnloadRoutine;
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = DriverCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = DriverCreateClose;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DriverControl;
 
     RtlInitUnicodeString(&ntWin32NameString, DOS_DEVICE_NAME);
     returnStatus = IoCreateSymbolicLink(&ntWin32NameString, &ntUnicodeString);
@@ -70,6 +117,8 @@ DriverEntry(
         DbgPrint("[NAK] :: [-] Couldn't create symbolic link for driver\n");
         IoDeleteDevice(deviceObject);
     }
+
+    DbgPrint("[NAK] :: [+] Setup completed, GO GO GO !!!!\n");
 
     OSVERSIONINFOW windowsVersionInfo;
     RtlGetVersion(&windowsVersionInfo);
@@ -104,14 +153,14 @@ DriverEntry(
         eprocessNameOffset = 0x5a8;
         eprocessLinkOffset = 0x448;
         listBLinkOffset = 0x8;
-        processHeadOffset = 0xc1f970;
-        miStateOffset = 0xc4f200;
+        processHeadOffset = 0xc1f960;
+        miStateOffset = 0xc4f040;
         hardwareOffset = 0x1580;
         systemNodeOffset = 0x20;
         firstVaOffset = 0x60;
         lastVaOffset = 0x68;
-        largePageTableOffset = 0xc17ed8;
-        largePageSizeOffset = 0xc17ed0;
+        largePageTableOffset = 0xc1a740;
+        largePageSizeOffset = 0xc1a738;
     }
 
     if (windowsVersionByPool == WINDOWS_NOT_SUPPORTED) {
@@ -145,7 +194,8 @@ DriverEntry(
 
     // TODO: Exception?????
     PVOID eprocess = (PVOID)IoGetCurrentProcess();
-    DbgPrint("[NAK] :: [ ] System eprocess        : 0x%p, [%15s]\n", eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+    DbgPrint("[NAK] :: [ ] System eprocess        : 0x%p, [%15s]\n",
+             eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
     PVOID processHead = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset + listBLinkOffset));
     DbgPrint("[NAK] :: [ ] PsActiveProcessHead    : 0x%p\n", processHead);
     PVOID ntosbase = (PVOID)((ULONG64)processHead - processHeadOffset);
@@ -154,7 +204,8 @@ DriverEntry(
     DbgPrint("[NAK] :: [ ] Scan the PsActiveProcessHead linked-list\n");
     while (*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) != (ULONG64)processHead) {
         eprocess = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) - eprocessLinkOffset);
-        DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n", eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+        DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n",
+                 eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
     }
 
     // TODO: Check if ntosbase is a PE, and the name is ntoskrnl.exe
@@ -231,8 +282,8 @@ DriverEntry(
     DbgPrint("[NAK] :: [+] large page address     : 0x%p\n", largePageTableArray);
     DbgPrint("[NAK] :: [+] large page size        : 0x%llx\n", largePageTableSize);
 
-    scanNormalPool(nonPagedPoolStart, nonPagedPoolEnd);
-    scanLargePool(largePageTableArray, largePageTableSize);
+    // scanNormalPool(nonPagedPoolStart, nonPagedPoolEnd);
+    // scanLargePool(largePageTableArray, largePageTableSize);
 
     return returnStatus;
 }
