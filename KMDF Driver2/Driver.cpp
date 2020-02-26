@@ -3,9 +3,9 @@
 #include <ntdef.h>
 #include <ntstrsafe.h>
 
-#include "sioctl.h"
 #include "Driver.h"
-#include "simplewsk.h"
+#include "sioctl.h"
+// #include "simplewsk.h"
 
 extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" DRIVER_UNLOAD UnloadRoutine;
@@ -24,6 +24,11 @@ extern "C" DRIVER_DISPATCH DriverControl;
 #define CHUNK_SIZE 16         // 64 bit
 // #define PAGE_SIZE 4096        // 4KB
 
+// some globals
+PVOID ntosbase;
+PVOID systemEprocess;
+PVOID processHead;
+
 // offset to get from PDB file
 ULONG64 eprocessNameOffset = 0;
 ULONG64 eprocessLinkOffset = 0;
@@ -36,6 +41,7 @@ ULONG64 firstVaOffset = 0;
 ULONG64 lastVaOffset = 0;
 ULONG64 largePageTableOffset = 0;
 ULONG64 largePageSizeOffset = 0;
+ULONG64 poolChunkSize = 0;
 
 NTSTATUS
 DriverCreateClose(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
@@ -58,6 +64,11 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
     ULONG controlCode;
     // PCHAR inBuf;
     // PCHAR outBuf;
+    PINPUT_DATA inputData = nullptr;
+    POUTPUT_DATA outputData = nullptr;
+    POFFSET_VALUE offsetValues = nullptr;
+    PDEREF_ADDR derefAddr = nullptr;
+    PSCAN_RANGE scanRange = nullptr;
 
     PAGED_CODE();
 
@@ -74,6 +85,60 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
 
     DbgPrint("[NAK] :: [ ] Control Code           : %lu\n", controlCode);
 
+    switch (controlCode) {
+        case IOCTL_SETUP_OFFSETS:
+            DbgPrint("[NAK] :: [ ] Setup offsets\n");
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            offsetValues = &(inputData->offsetValues);
+            eprocessNameOffset   = offsetValues->eprocessNameOffset;
+            eprocessLinkOffset   = offsetValues->eprocessLinkOffset;
+            listBLinkOffset      = offsetValues->listBLinkOffset;
+            processHeadOffset    = offsetValues->processHeadOffset;
+            miStateOffset        = offsetValues->miStateOffset;
+            hardwareOffset       = offsetValues->hardwareOffset;
+            systemNodeOffset     = offsetValues->systemNodeOffset;
+            firstVaOffset        = offsetValues->firstVaOffset;
+            lastVaOffset         = offsetValues->lastVaOffset;
+            largePageTableOffset = offsetValues->largePageTableOffset;
+            largePageSizeOffset  = offsetValues->largePageSizeOffset;
+            poolChunkSize        = offsetValues->poolChunkSize;
+            setup();
+            break;
+        case GET_KERNEL_BASE:
+            DbgPrint("[NAK] :: [ ] Get kernel base\n");
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+            // TODO: check for safety outputData address null
+            outputData->ulong64Value = (ULONG64)ntosbase;
+            Irp->IoStatus.Information = sizeof(ULONG64);
+            break;
+        case SCAN_PS_ACTIVE_HEAD:
+            DbgPrint("[NAK] :: [ ] Scan ps active head\n");
+            scan_ps_active_head();
+            break;
+        case SCAN_POOL:
+            DbgPrint("[NAK] :: [ ] Scan pool\n");
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            scanRange = &(inputData->scanRange);
+            DbgPrint("[NAK] :: Range: %llx - %llx", scanRange->start, scanRange->end);
+            scanNormalPool(scanRange->start, scanRange->end);
+            break;
+        case SCAN_POOL_REMOTE:
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+            scanRange = &(inputData->scanRange);
+            (outputData->poolChunk).addr = (ULONG64)scanRemote(scanRange->start, scanRange->end);
+            break;
+        case DEREFERENCE_ADDRESS:
+            DbgPrint("[NAK] :: [ ] Deref address\n");
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            derefAddr = &(inputData->derefAddr);
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+            DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
+            RtlCopyBytes((PVOID)outputData, (PVOID)derefAddr->addr, (SIZE_T)derefAddr->size);
+            break;
+        default:
+            break;
+    }
 
     Irp->IoStatus.Status = ntStatus;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -91,6 +156,8 @@ DriverEntry(
     UNICODE_STRING ntUnicodeString;
     UNICODE_STRING ntWin32NameString;
     PDEVICE_OBJECT  deviceObject = nullptr;
+
+    PAGED_CODE();
 
     RtlInitUnicodeString(&ntUnicodeString, NT_DEVICE_NAME);
     returnStatus = IoCreateDevice(
@@ -118,7 +185,55 @@ DriverEntry(
         IoDeleteDevice(deviceObject);
     }
 
-    DbgPrint("[NAK] :: [+] Setup completed, GO GO GO !!!!\n");
+    systemEprocess = IoGetCurrentProcess();
+
+    DbgPrint("[NAK] :: [+] Setup completed, waiting for command on DeviceIo\n");
+
+    return returnStatus;
+}
+
+VOID
+setup() {
+    PAGED_CODE();
+    // TODO: Exception?????
+    PVOID eprocess = systemEprocess;
+    DbgPrint("[NAK] :: [ ] System eprocess        : 0x%p, [%15s]\n",
+             eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+    processHead = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset + listBLinkOffset));
+    DbgPrint("[NAK] :: [ ] PsActiveProcessHead    : 0x%p\n", processHead);
+    ntosbase = (PVOID)((ULONG64)processHead - processHeadOffset);
+    DbgPrint("[NAK] :: [ ] ntoskrnl.exe           : 0x%p\n", ntosbase);
+
+    // TODO: Check if ntosbase is a PE, and the name is ntoskrnl.exe
+    // https://stackoverflow.com/a/4316804
+    // https://stackoverflow.com/a/47898643
+    // https://github.com/Reetus/RazorRE/blob/42f441093bd85443b39fcff5d2a02069b524b114/Crypt/Misc.cpp#L63
+    // if (ntosbase->e_magic == IMAGE_DOS_SIGNATURE) {
+    //     DbgPrint("[NAK] :: [ ] DOS Signature (MZ) Matched \n");
+    //     const PIMAGE_NT_HEADERS32 peHeader = (PIMAGE_NT_HEADERS32) ((unsigned char*)ntosbase+ntosbase->e_lfanew);
+    //     if(peHeader->Signature == IMAGE_NT_SIGNATURE) {
+    //         DbgPrint("[NAK] :: [ ] PE Signature (PE) Matched \n");
+    //         // yeah we really got ntoskrnl.exe base
+    //     }
+    // }
+
+}
+
+VOID
+scan_ps_active_head() {
+    PVOID eprocess = (PVOID)((ULONG64)processHead - eprocessLinkOffset);
+    DbgPrint("[NAK] :: [ ] Scan the PsActiveProcessHead linked-list\n");
+    while (*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) != (ULONG64)processHead) {
+        eprocess = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) - eprocessLinkOffset);
+        DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n",
+                 eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+    }
+}
+
+NTSTATUS
+routine() {
+    PAGED_CODE();
+    NTSTATUS returnStatus = STATUS_SUCCESS;
 
     OSVERSIONINFOW windowsVersionInfo;
     RtlGetVersion(&windowsVersionInfo);
@@ -150,17 +265,17 @@ DriverEntry(
     else if (windowsVersionInfo.dwBuildNumber >= 19536) {
         DbgPrint("[NAK] :: [ ] Detected windows       : 2020 Fast Ring\n");
         windowsVersionByPool = WINDOWS_2020_FASTRING;
-        eprocessNameOffset = 0x5a8;
-        eprocessLinkOffset = 0x448;
-        listBLinkOffset = 0x8;
-        processHeadOffset = 0xc1f960;
-        miStateOffset = 0xc4f040;
-        hardwareOffset = 0x1580;
-        systemNodeOffset = 0x20;
-        firstVaOffset = 0x60;
-        lastVaOffset = 0x68;
-        largePageTableOffset = 0xc1a740;
-        largePageSizeOffset = 0xc1a738;
+        // eprocessNameOffset = 0x5a8;
+        // eprocessLinkOffset = 0x448;
+        // listBLinkOffset = 0x8;
+        // processHeadOffset = 0xc1f960;
+        // miStateOffset = 0xc4f040;
+        // hardwareOffset = 0x1580;
+        // systemNodeOffset = 0x20;
+        // firstVaOffset = 0x60;
+        // lastVaOffset = 0x68;
+        // largePageTableOffset = 0xc1a740;
+        // largePageSizeOffset = 0xc1a738;
     }
 
     if (windowsVersionByPool == WINDOWS_NOT_SUPPORTED) {
@@ -191,35 +306,6 @@ DriverEntry(
      * 2015 -> 2016 -> 2018 -> 2019 -> 2020 all have a slight (or big) different
      *
     **/
-
-    // TODO: Exception?????
-    PVOID eprocess = (PVOID)IoGetCurrentProcess();
-    DbgPrint("[NAK] :: [ ] System eprocess        : 0x%p, [%15s]\n",
-             eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
-    PVOID processHead = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset + listBLinkOffset));
-    DbgPrint("[NAK] :: [ ] PsActiveProcessHead    : 0x%p\n", processHead);
-    PVOID ntosbase = (PVOID)((ULONG64)processHead - processHeadOffset);
-    DbgPrint("[NAK] :: [ ] ntoskrnl.exe           : 0x%p\n", ntosbase);
-
-    DbgPrint("[NAK] :: [ ] Scan the PsActiveProcessHead linked-list\n");
-    while (*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) != (ULONG64)processHead) {
-        eprocess = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) - eprocessLinkOffset);
-        DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n",
-                 eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
-    }
-
-    // TODO: Check if ntosbase is a PE, and the name is ntoskrnl.exe
-    // https://stackoverflow.com/a/4316804
-    // https://stackoverflow.com/a/47898643
-    // https://github.com/Reetus/RazorRE/blob/42f441093bd85443b39fcff5d2a02069b524b114/Crypt/Misc.cpp#L63
-    // if (ntosbase->e_magic == IMAGE_DOS_SIGNATURE) {
-    //     DbgPrint("[NAK] :: [ ] DOS Signature (MZ) Matched \n");
-    //     const PIMAGE_NT_HEADERS32 peHeader = (PIMAGE_NT_HEADERS32) ((unsigned char*)ntosbase+ntosbase->e_lfanew);
-    //     if(peHeader->Signature == IMAGE_NT_SIGNATURE) {
-    //         DbgPrint("[NAK] :: [ ] PE Signature (PE) Matched \n");
-    //         // yeah we really got ntoskrnl.exe base
-    //     }
-    // }
 
     /**
      * In Windows 10 Insider Preview Feb 2020, the global debug is MiState, try this in windbg and see
@@ -292,6 +378,7 @@ VOID
 UnloadRoutine(_In_ PDRIVER_OBJECT DriverObject) {
     PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
     UNICODE_STRING uniWin32NameString;
+    PAGED_CODE();
 
     RtlInitUnicodeString(&uniWin32NameString, DOS_DEVICE_NAME);
     IoDeleteSymbolicLink(&uniWin32NameString);
@@ -385,7 +472,6 @@ scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
     POOL_HEADER p;
     PVOID eprocess;
     char eprocess_name[16] = {0}; // eprocess name is 15 bytes + 1 null
-    const ULONG64 headerSize = 0x10;
     PVOID currentAddr = (PVOID)(nonPagedPoolStart);
     while (true) {
         if ((ULONG64)currentAddr >= nonPagedPoolEnd)
@@ -413,23 +499,27 @@ scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
 
         // TODO: perform scan in one page, use BlockSize/PreviousBlockSize
         toPoolHeader(&p, (PVOID)currentAddr);
-        currentAddr = (PVOID)((ULONG64)currentAddr + headerSize);
+        currentAddr = (PVOID)((ULONG64)currentAddr + poolChunkSize);
 
         if (p.tag == 0) continue;
         if (!validTag(&p)) continue;
         if (!validPool(&p)) continue;
 
-        if (p.tag != 'Proc' && p.tag != 'corP')
+        if (p.tag != 'Proc')
             continue;
 
         // TODO: Parse data as _EPROCESS
-        // The first Proc found seems to be the EPROCESS from IoGetCurrentProcess
-        // But it was offset 0x40
-        // printChunkInfo(&p);
-        // eprocess = (PVOID)((ULONG64)p.addr + 0x40);
-        // RtlStringCbCopyNA(eprocess_name, 16, (char*)((ULONG64)eprocess + eprocessNameOffset), 15);
-        // DbgPrint("[NAK] :: [ ] eprocess offset 0x40   : 0x%p, [%s]\n", eprocess, eprocess_name);
-        eprocess = (PVOID)((ULONG64)p.addr + 0x80);
+        // The first Proc found seems to be the System _EPROCESS
+        // The offset of system's chunk to _EPROCESS is 0x40, size is ...
+        // but offset of other processes' chunk to _EPROCESS is 0x80, size is 0xe00
+        printChunkInfo(&p);
+        if (p->blockSize * CHUNK_SIZE == 0xf00) {
+            eprocess = (PVOID)((ULONG64)p.addr + 0x40);
+        } else if (p->blockSize * CHUNK_SIZE == 0xd80) {
+            eprocess = (PVOID)((ULONG64)p.addr + 0x70);
+        } else if (p->blockSize * CHUNK_SIZE == 0xe00) {
+            eprocess = (PVOID)((ULONG64)p.addr + 0x80);
+        }
         RtlStringCbCopyNA(eprocess_name, 16, (char*)((ULONG64)eprocess + eprocessNameOffset), 15);
         DbgPrint("[NAK] :: [ ] eprocess offset 0x80   : 0x%p, [%s]\n", eprocess, eprocess_name);
     }
@@ -440,4 +530,32 @@ scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
 VOID
 scanLargePool(PVOID /* largePageTableArray */, ULONG64 /* largePageTableSize */) {
     DbgPrint("[NAK] :: [-] Scan large pool not supported yet");
+}
+
+PVOID
+scanRemote(ULONG64 startAddress, ULONG64 endAddress) {
+    POOL_HEADER p;
+    PVOID currentAddr = (PVOID)startAddress;
+    while (true) {
+        if ((ULONG64)currentAddr >= endAddress)
+                break;
+
+        if (!MmIsAddressValid(currentAddr)) {
+            currentAddr = (PVOID)((ULONG64)currentAddr + PAGE_SIZE);
+            continue;
+        }
+
+        toPoolHeader(&p, (PVOID)currentAddr);
+        currentAddr = (PVOID)((ULONG64)currentAddr + poolChunkSize);
+
+        if (p.tag == 0) continue;
+        if (!validTag(&p)) continue;
+        if (!validPool(&p)) continue;
+
+        if (p.tag != 'Proc')
+            continue;
+
+        return p.addr;
+    }
+    return (PVOID)endAddress;
 }

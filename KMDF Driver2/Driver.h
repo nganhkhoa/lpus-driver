@@ -19,6 +19,12 @@ enum VERSION_BY_POOL {
 };
 
 VOID
+setup();
+
+VOID
+scan_ps_active_head();
+
+VOID
 toPoolHeader(PPOOL_HEADER p, PVOID chunkAddr);
 
 VOID
@@ -38,5 +44,8 @@ scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd);
 
 VOID
 scanLargePool(PVOID largePageTableArray, ULONG64 largePageTableSize);
+
+PVOID
+scanRemote(ULONG64 startAddress, ULONG64 endAddress);
 
 #endif
