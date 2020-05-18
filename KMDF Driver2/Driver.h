@@ -46,7 +46,7 @@ VOID
 scanLargePool(PVOID largePageTableArray, ULONG64 largePageTableSize);
 
 PVOID
-scanRemote(ULONG64 startAddress, ULONG64 endAddress);
+scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag);
 
 VOID
 hideProcess(CHAR* name, ULONG64 size);

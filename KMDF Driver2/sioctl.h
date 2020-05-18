@@ -76,6 +76,7 @@ typedef struct _DEREF_ADDR {
 typedef struct _SCAN_RANGE {
     ULONG64 start;
     ULONG64 end;
+    ULONG tag;
 } SCAN_RANGE, *PSCAN_RANGE;
 
 typedef struct _HIDE_PROCESS {

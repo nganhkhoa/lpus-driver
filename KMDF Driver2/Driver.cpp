@@ -126,7 +126,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
             scanRange = &(inputData->scanRange);
             DbgPrint("[NAK] :: Range: %llx - %llx", scanRange->start, scanRange->end);
-            (outputData->poolChunk).addr = (ULONG64)scanRemote(scanRange->start, scanRange->end);
+            (outputData->poolChunk).addr = (ULONG64)scanRemote(scanRange->start, scanRange->end, scanRange->tag);
             DbgPrint("[NAK] :: Found: %llx", (outputData->poolChunk).addr);
             break;
         case DEREFERENCE_ADDRESS:
@@ -575,12 +575,12 @@ scanLargePool(PVOID /* largePageTableArray */, ULONG64 /* largePageTableSize */)
 }
 
 PVOID
-scanRemote(ULONG64 startAddress, ULONG64 endAddress) {
+scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
     POOL_HEADER p;
     PVOID currentAddr = (PVOID)startAddress;
     while (true) {
         if ((ULONG64)currentAddr >= endAddress)
-                break;
+            break;
 
         if (!MmIsAddressValid(currentAddr)) {
             currentAddr = (PVOID)((ULONG64)currentAddr + PAGE_SIZE);
@@ -592,9 +592,9 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress) {
 
         if (p.tag == 0) continue;
         if (!validTag(&p)) continue;
-        if (!validPool(&p)) continue;
+        // if (!validPool(&p)) continue;
 
-        if (p.tag != 'Proc' && p.tag != 'corP')
+        if (p.tag != tag)
             continue;
 
         return p.addr;
