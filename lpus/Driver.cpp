@@ -5,7 +5,6 @@
 
 #include "Driver.h"
 #include "sioctl.h"
-// #include "simplewsk.h"
 
 extern "C" DRIVER_INITIALIZE DriverEntry;
 extern "C" DRIVER_UNLOAD UnloadRoutine;
@@ -16,11 +15,7 @@ extern "C" DRIVER_DISPATCH DriverControl;
 #define NT_DEVICE_NAME      L"\\Device\\poolscanner"
 #define DOS_DEVICE_NAME     L"\\DosDevices\\poolscanner"
 
-#define F_DbgPrint(...) \
-                DbgPrint("[NAK] :: ");\
-                DbgPrint(__VA_ARGS__);
-
-#define POOL_HEADER_SIZE 0x10 // windows 10
+// #define POOL_HEADER_SIZE 0x10 // windows 10
 #define CHUNK_SIZE 16         // 64 bit
 // #define PAGE_SIZE 4096        // 4KB
 
@@ -114,13 +109,13 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             DbgPrint("[NAK] :: [ ] Scan ps active head\n");
             scan_ps_active_head();
             break;
-        case SCAN_POOL:
-            DbgPrint("[NAK] :: [ ] Scan pool\n");
-            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
-            scanRange = &(inputData->scanRange);
-            DbgPrint("[NAK] :: Range: %llx - %llx", scanRange->start, scanRange->end);
-            scanNormalPool(scanRange->start, scanRange->end);
-            break;
+        // case SCAN_POOL:
+        //     DbgPrint("[NAK] :: [ ] Scan pool\n");
+        //     inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+        //     scanRange = &(inputData->scanRange);
+        //     DbgPrint("[NAK] :: Range: %llx - %llx", scanRange->start, scanRange->end);
+        //     scanNormalPool(scanRange->start, scanRange->end);
+        //     break;
         case SCAN_POOL_REMOTE:
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
@@ -177,7 +172,7 @@ DriverEntry(
         FALSE,                          // Not an exclusive device
         &deviceObject);                 // Returned ptr to Device Object
     if (!NT_SUCCESS(returnStatus)) {
-        DbgPrint(("[NAK] :: [-] Couldn't create the device object\n"));
+        DbgPrint(("[NAK] :: [-] Could not create the device object\n"));
         return returnStatus;
     }
 
@@ -189,7 +184,7 @@ DriverEntry(
     RtlInitUnicodeString(&ntWin32NameString, DOS_DEVICE_NAME);
     returnStatus = IoCreateSymbolicLink(&ntWin32NameString, &ntUnicodeString);
     if (!NT_SUCCESS(returnStatus)) {
-        DbgPrint("[NAK] :: [-] Couldn't create symbolic link for driver\n");
+        DbgPrint("[NAK] :: [-] Could not create symbolic link for driver\n");
         IoDeleteDevice(deviceObject);
     }
 
@@ -224,7 +219,6 @@ setup() {
     //         // yeah we really got ntoskrnl.exe base
     //     }
     // }
-
 }
 
 VOID
@@ -267,150 +261,6 @@ hideProcess(CHAR* name, ULONG64 size) {
     }
 }
 
-NTSTATUS
-routine() {
-    PAGED_CODE();
-    NTSTATUS returnStatus = STATUS_SUCCESS;
-
-    OSVERSIONINFOW windowsVersionInfo;
-    RtlGetVersion(&windowsVersionInfo);
-    DbgPrint("[NAK] :: [ ] Windows version        : %lu.%lu.%lu\n",
-            windowsVersionInfo.dwMajorVersion, windowsVersionInfo.dwMinorVersion, windowsVersionInfo.dwBuildNumber);
-
-    if (windowsVersionInfo.dwMajorVersion != 10) {
-        DbgPrint("[NAK] :: [-] Windows version outside 10 is not supported yet!");
-        return returnStatus;
-    }
-
-    // https://en.wikipedia.org/wiki/Windows_10_version_history
-    VERSION_BY_POOL windowsVersionByPool = WINDOWS_NOT_SUPPORTED;
-
-    // TODO: Move this to front-end for portable update
-    // TODO: automatically get from parsed PDB file
-    if (windowsVersionInfo.dwBuildNumber == 17134 || windowsVersionInfo.dwBuildNumber == 17763) {
-        DbgPrint("[NAK] :: [ ] Detected windows       : 2018\n");
-        windowsVersionByPool = WINDOWS_2018;
-    }
-    else if (windowsVersionInfo.dwBuildNumber == 18362 || windowsVersionInfo.dwBuildNumber == 18363) {
-        DbgPrint("[NAK] :: [ ] Detected windows       : 2019\n");
-        windowsVersionByPool = WINDOWS_2019;
-    }
-    else if (windowsVersionInfo.dwBuildNumber == 19041) {
-        DbgPrint("[NAK] :: [ ] Detected windows       : 2020\n");
-        windowsVersionByPool = WINDOWS_2020;
-    }
-    else if (windowsVersionInfo.dwBuildNumber >= 19536) {
-        DbgPrint("[NAK] :: [ ] Detected windows       : 2020 Fast Ring\n");
-        windowsVersionByPool = WINDOWS_2020_FASTRING;
-        // eprocessNameOffset = 0x5a8;
-        // eprocessLinkOffset = 0x448;
-        // listBLinkOffset = 0x8;
-        // processHeadOffset = 0xc1f960;
-        // miStateOffset = 0xc4f040;
-        // hardwareOffset = 0x1580;
-        // systemNodeOffset = 0x20;
-        // firstVaOffset = 0x60;
-        // lastVaOffset = 0x68;
-        // largePageTableOffset = 0xc1a740;
-        // largePageSizeOffset = 0xc1a738;
-    }
-
-    if (windowsVersionByPool == WINDOWS_NOT_SUPPORTED) {
-        DbgPrint("[NAK] :: [-] Windows 10 with this build number is not supported yet!");
-        return returnStatus;
-    }
-
-    /**
-     * Try to find `MmNonPagedPoolStart` and `MmNonPagedPoolEnd`
-     *
-     * https://web.archive.org/web/20061110120809/http://www.rootkit.com/newsread.php?newsid=153
-     * KPCR->KdVersionBlock->Debugger Data List Entry->Flink
-     *
-     * This technique is old and cannot be used in Windows 10, Windows 7/8 may fail too,
-     * After research, the result is summary into this README
-     * https://github.com/nganhkhoa/pdb_for_nonpagedpool
-     *
-     * Basically, find ntoskrnl.exe module address (kernel base) in memory and use offsets parsed from PDB file,
-     * Finding the kernel base by shellcode is not usable in Windows 2020 Insider Preview,
-     * I use IoGetCurrentProcess and traverse the ActiveProcessLinks linked list,
-     * Luckily, the process returned by IoGetCurrentProcess is System (the first process), so the BLINK is nt!PsActiveProcessHead
-     * With offset of nt!PsActiveProcessHead parsed from PDB file, we can get the kernel base by subtracting.
-     *
-     * Then offset to find NonPagedPool{First,Last}Va
-     *
-     * In Windows 10, we must use nt!MiState and look into Hardware->NodeInfo,
-     * there is a slightly different layout/offset to each version of Windows by year?
-     * 2015 -> 2016 -> 2018 -> 2019 -> 2020 all have a slight (or big) different
-     *
-    **/
-
-    /**
-     * In Windows 10 Insider Preview Feb 2020, the global debug is MiState, try this in windbg and see
-     * `x nt!MiState` to get address of MiState
-     * `dt _MI_SYSTEM_INFORMATION` to get offset to Hardware
-     * `dt _MI_HARDWARE_STATE` to get offset to SystemNodeNonPagedPool
-     * with those offset, use the following command to list the NonPagedPool{First,Last}Va
-     * `dt (_MI_SYSTEM_NODE_NONPAGED_POOL*) (<nt!MiState> + <HARDWHARE_OFFSET> + <NODE_INFO_OFFSET>)`
-     * Sample output
-     *
-     * +0x000 DynamicBitMapNonPagedPool : _MI_DYNAMIC_BITMAP
-     * +0x048 CachedNonPagedPoolCount : 0
-     * +0x050 NonPagedPoolSpinLock : 0
-     * +0x058 CachedNonPagedPool : (null)
-     * +0x060 NonPagedPoolFirstVa : 0xffffe580`00000000 Void
-     * +0x068 NonPagedPoolLastVa : 0xfffff580`00000000 Void
-     * +0x070 SystemNodeInformation : 0xffffe58f`9283b050 _MI_SYSTEM_NODE_INFORMATION
-     *
-     * The big page pool is denoted by two variables `PoolBigPageTable.Va` and `PoolBigPageTableSize`
-     * It seems that this big page is inside NonPagedPool range
-     *
-     * PoolBigPageTable is an array with PoolBigPageTableSize elements, where
-     * each elements has:
-     * Va -> Address of the allocation
-     * Key -> Pool tag
-     * NumberOfBytes -> Size
-     *
-     **/
-
-    PVOID miState = (PVOID)((ULONG64)ntosbase + miStateOffset);
-    DbgPrint("[NAK] :: [ ] nt!MiState             : 0x%p\n", miState);
-    PVOID systemNonPageInfo = nullptr;
-
-    ULONG64 nonPagedPoolStart = 0;
-    ULONG64 nonPagedPoolEnd = 0;
-    PVOID largePageTableArray = 0;
-    ULONG64 largePageTableSize = 0;
-
-    largePageTableArray = (PVOID)((ULONG64)ntosbase + largePageTableOffset);
-    largePageTableSize = *(ULONG64*)((ULONG64)ntosbase + largePageSizeOffset);
-
-
-    // TODO: Move this to front-end for portable update
-    // use defined formula by windows build number to get those two values
-    switch (windowsVersionByPool) {
-        case WINDOWS_2020_FASTRING:
-            systemNonPageInfo = (PVOID)*(ULONG64*)((ULONG64)miState + hardwareOffset + systemNodeOffset);
-            DbgPrint("[NAK] :: [ ] &systemNonPageInfo     : 0x%p\n", systemNonPageInfo);
-            DbgPrint("[NAK] :: [ ] &NonPagedPoolFirstVa   : 0x%p\n", (ULONG64*)((ULONG64)systemNonPageInfo + firstVaOffset));
-            DbgPrint("[NAK] :: [ ] &NonPagedPoolLastVa    : 0x%p\n", (ULONG64*)((ULONG64)systemNonPageInfo + lastVaOffset));
-            nonPagedPoolStart = *(ULONG64*)((ULONG64)systemNonPageInfo + firstVaOffset);
-            nonPagedPoolEnd = *(ULONG64*)((ULONG64)systemNonPageInfo + lastVaOffset);
-            break;
-        default:
-            break;
-    }
-
-    DbgPrint("[NAK] :: [+] nonPagedPoolStart      : 0x%llx\n", nonPagedPoolStart);
-    DbgPrint("[NAK] :: [+] nonPagedPoolEnd        : 0x%llx\n", nonPagedPoolEnd);
-    DbgPrint("[NAK] :: [+] large page address     : 0x%p\n", largePageTableArray);
-    DbgPrint("[NAK] :: [+] large page size        : 0x%llx\n", largePageTableSize);
-
-    // scanNormalPool(nonPagedPoolStart, nonPagedPoolEnd);
-    // scanLargePool(largePageTableArray, largePageTableSize);
-
-    return returnStatus;
-}
-
 VOID
 UnloadRoutine(_In_ PDRIVER_OBJECT DriverObject) {
     PDEVICE_OBJECT deviceObject = DriverObject->DeviceObject;
@@ -437,11 +287,6 @@ toPoolHeader(PPOOL_HEADER p, PVOID chunkAddr) {
     p->tag           = *(ULONG*)((ULONG64) chunkAddr + 0x4);
 }
 
-VOID
-tryNextChunk(PPOOL_HEADER p) {
-    toPoolHeader(p, (PVOID)((ULONG64)p->addr + CHUNK_SIZE));
-}
-
 bool
 validTag(PPOOL_HEADER p) {
     // I know the compiler will optimize for me, so meeh :)
@@ -460,22 +305,6 @@ validTag(PPOOL_HEADER p) {
     return true;
 }
 
-bool
-validPool(PPOOL_HEADER p) {
-    // https://subs.emis.de/LNI/Proceedings/Proceedings97/GI-Proceedings-97-9.pdf
-    // long long int offsetInPage = (long long int)p->addr % PAGE_SIZE;   // OffsetInPage = addr % pagesize
-    // (offsetInPage % CHUNK_SIZE == 0) &&       // rule 1
-    // (p->blockSize > 0) &&             // rule 2
-    // (p->blockSize * CHUNK_SIZE + offsetInPage == PAGE_SIZE) &&  // rule 3
-    // (p->prevBlockSize * CHUNK_SIZE <= offsetInPage) // rule 5
-    if ((p->blockSize * CHUNK_SIZE) < 0xb00 + 0x10 || // eprocess size + pool_header size
-        // p->poolType % 2 != 0 || // pool tag must be even number aka nonpaged
-        p->poolType != 2     // force to search for nonpaged pool only aka poolType == 2
-       )
-        return false;
-    return true;
-}
-
 VOID
 printChunkInfo(PPOOL_HEADER p) {
     DbgPrint("[NAK] :: [+] ==== PoolStart 0x%p ====\n", p->addr);
@@ -483,90 +312,9 @@ printChunkInfo(PPOOL_HEADER p) {
     DbgPrint("[NAK] :: [|] \tPoolIndex     : 0x%x\n", p->poolIndex);
     DbgPrint("[NAK] :: [|] \tBlockSize     : 0x%x\n", p->blockSize * CHUNK_SIZE);
     DbgPrint("[NAK] :: [|] \tPoolType      : 0x%x\n", p->poolType);
+    DbgPrint("[NAK] :: [|] \tPoolTag       : 0x%x\n", p->tag);
     DbgPrint("[NAK] :: [|] \tPoolTag       : 0x%lx [%4s]\n", p->tag, p->tag);
     DbgPrint("[NAK] :: [+] ==== PoolEnd   0x%p ====\n", p->addr);
-}
-
-VOID
-scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd) {
-    DbgPrint("[NAK] :: [+] Scanning\n");
-
-    /*
-     * The name nonpaged pool is quite misunderstanding,
-     * the correct definition of a nonpaged pool is a pool which remains on the nonpaged region
-     * nonpaged region is a range of address inside the kernel virtual address that has
-     * a correspoding page in the physical memory (RAM)
-     *
-     * Which is, if there is a **valid** page in nonpaged pool, there is a correspoding page in RAM
-     * The OS will allocate a page in this nonpaged region with a page in RAM when a new page
-     * is requested to be nonpaged and there is no space left in current allocated nonpaged region.
-     *
-     * That is, if the address lies in the nonpaged region but is not allocated yet to have a
-     * backed paged on RAM, then a bug check will occur. The name is `PAGE FAULT IN NONPAGED AREA`
-     *
-     **/
-
-    POOL_HEADER p;
-    PVOID eprocess = nullptr;
-    char eprocess_name[16] = {0}; // eprocess name is 15 bytes + 1 null
-    PVOID currentAddr = (PVOID)(nonPagedPoolStart);
-    while (true) {
-        if ((ULONG64)currentAddr >= nonPagedPoolEnd)
-                break;
-
-        /*
-         * BOOLEAN MmIsAddressValid(PVOID)
-         *
-         * Warning  We do not recommend using this function.
-         *
-         * If no page fault would occur from reading or writing at the given virtual address,
-         * MmIsAddressValid returns TRUE.
-         *
-         * Even if MmIsAddressValid returns TRUE, accessing the address can cause page faults
-         * unless the memory has been locked down or the address **is a valid nonpaged pool address**.
-         *
-         * Well, we got a nonpaged pool address, so it is good
-         *
-         **/
-        if (!MmIsAddressValid(currentAddr)) {
-            // Because a chunk pool reside on a page, so we check on page alignment
-            currentAddr = (PVOID)((ULONG64)currentAddr + PAGE_SIZE);
-            continue;
-        }
-
-        // TODO: perform scan in one page, use BlockSize/PreviousBlockSize
-        toPoolHeader(&p, (PVOID)currentAddr);
-        currentAddr = (PVOID)((ULONG64)currentAddr + poolChunkSize);
-
-        if (p.tag == 0) continue;
-        if (!validTag(&p)) continue;
-        if (!validPool(&p)) continue;
-
-        if (p.tag != 'Proc' && p.tag != 'corP')
-            continue;
-
-        // TODO: Parse data as _EPROCESS
-        // The first Proc found seems to be the System _EPROCESS
-        // The offset of system's chunk to _EPROCESS is 0x40, size is ...
-        // but offset of other processes' chunk to _EPROCESS is 0x80, size is 0xe00
-        // TODO: search for CreateTime, this field must be in range [system startup time; now]
-        // this is resolved in frontend
-        printChunkInfo(&p);
-        if (p.blockSize * CHUNK_SIZE == 0xf00) {
-            eprocess = (PVOID)((ULONG64)p.addr + 0x40);
-        } else if (p.blockSize * CHUNK_SIZE == 0xd80) {
-            eprocess = (PVOID)((ULONG64)p.addr + 0x70);
-        } else if (p.blockSize * CHUNK_SIZE == 0xe00) {
-            eprocess = (PVOID)((ULONG64)p.addr + 0x80);
-        } else {
-            DbgPrint("[NAK] :: [ ] This is not a valid eprocess, maybe\n");
-            continue;
-        }
-        RtlStringCbCopyNA(eprocess_name, 16, (char*)((ULONG64)eprocess + eprocessNameOffset), 15);
-        DbgPrint("[NAK] :: [ ] eprocess offset 0x80   : 0x%p, [%s]\n", eprocess, eprocess_name);
-    }
-
-    DbgPrint("[NAK] :: [+] Finish scanning");
 }
 
 VOID
@@ -586,14 +334,20 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
             currentAddr = (PVOID)((ULONG64)currentAddr + PAGE_SIZE);
             continue;
         }
+        if (!MmIsAddressValid((PVOID)((ULONG64)currentAddr + 0x10))) {
+            // to be correct, this should be next page,
+            // but I put this to make it works first
+            // >> currentAddr is at the end of a page,
+            //    currentAddr+0x10 will be some section bad page
+            //    which if we parse the header, will be blue screen
+            currentAddr = (PVOID)((ULONG64)currentAddr + 0x4);
+            continue;
+        }
+        currentAddr = (PVOID)((ULONG64)currentAddr + 0x4);
 
         toPoolHeader(&p, (PVOID)currentAddr);
-        currentAddr = (PVOID)((ULONG64)currentAddr + poolChunkSize);
-
-        if (p.tag == 0) continue;
+        if (p.poolType != 2) continue;
         if (!validTag(&p)) continue;
-        // if (!validPool(&p)) continue;
-
         if (p.tag != tag)
             continue;
 

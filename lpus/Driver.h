@@ -27,20 +27,20 @@ scan_ps_active_head();
 VOID
 toPoolHeader(PPOOL_HEADER p, PVOID chunkAddr);
 
-VOID
-tryNextChunk(PPOOL_HEADER p);
+// VOID
+// tryNextChunk(PPOOL_HEADER p);
 
 bool
 validTag(PPOOL_HEADER p);
 
-bool
-validPool(PPOOL_HEADER p);
+// bool
+// validPool(PPOOL_HEADER p);
 
 VOID
 printChunkInfo(PPOOL_HEADER p);
 
-VOID
-scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd);
+// VOID
+// scanNormalPool(ULONG64 nonPagedPoolStart, ULONG64 nonPagedPoolEnd);
 
 VOID
 scanLargePool(PVOID largePageTableArray, ULONG64 largePageTableSize);
