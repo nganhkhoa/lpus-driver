@@ -120,9 +120,9 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
             scanRange = &(inputData->scanRange);
-            DbgPrint("[NAK] :: Range: %llx - %llx", scanRange->start, scanRange->end);
+            DbgPrint("[NAK] :: Range: %llx - %llx\n", scanRange->start, scanRange->end);
             (outputData->poolChunk).addr = (ULONG64)scanRemote(scanRange->start, scanRange->end, scanRange->tag);
-            DbgPrint("[NAK] :: Found: %llx", (outputData->poolChunk).addr);
+            DbgPrint("[NAK] :: Found: %llx\n", (outputData->poolChunk).addr);
             break;
         case DEREFERENCE_ADDRESS:
             // DbgPrint("[NAK] :: [ ] Deref address\n");
@@ -319,7 +319,7 @@ printChunkInfo(PPOOL_HEADER p) {
 
 VOID
 scanLargePool(PVOID /* largePageTableArray */, ULONG64 /* largePageTableSize */) {
-    DbgPrint("[NAK] :: [-] Scan large pool not supported yet");
+    DbgPrint("[NAK] :: [-] Scan large pool not supported yet\n");
 }
 
 PVOID
@@ -331,6 +331,7 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
             break;
 
         if (!MmIsAddressValid(currentAddr)) {
+            // DbgPrint("[NAK] Skip page at %p\n", currentAddr);
             currentAddr = (PVOID)((ULONG64)currentAddr + PAGE_SIZE);
             continue;
         }
