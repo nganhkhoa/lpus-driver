@@ -347,7 +347,7 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
 
         toPoolHeader(&p, (PVOID)currentAddr);
         if (p.poolType != 2) continue;
-        if (!validTag(&p)) continue;
+        // if (!validTag(&p)) continue;
         if (p.tag != tag)
             continue;
 
