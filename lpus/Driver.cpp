@@ -125,13 +125,29 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             DbgPrint("[NAK] :: Found: %llx\n", (outputData->poolChunk).addr);
             break;
         case DEREFERENCE_ADDRESS:
-            // DbgPrint("[NAK] :: [ ] Deref address\n");
+            //DbgPrint("[NAK] :: [ ] Deref address\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             derefAddr = &(inputData->derefAddr);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
-            // DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
+            //DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
             RtlCopyBytes((PVOID)outputData, (PVOID)derefAddr->addr, (SIZE_T)derefAddr->size);
             break;
+
+        case DEREFERENCE_PHYSICAL_ADDRESS:
+            DbgPrint("[NAK] :: [ ] Deref physical address\n");
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            derefAddr = &(inputData->derefAddr);
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+
+            //Only usable after Windows 8.1, this needs to work on Windows 7
+            /*_MM_COPY_ADDRESS copy_addr;
+            copy_addr.PhysicalAddress.QuadPart = derefAddr->addr;
+            SIZE_T NumberOfBytesTransferred;
+
+            MmCopyMemory((PVOID)outputData, copy_addr, derefAddr->size, MM_COPY_MEMORY_PHYSICAL, &NumberOfBytesTransferred);*/
+            DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", NumberOfBytesTransferred, derefAddr->addr);
+            break;
+
         case HIDE_PROCESS_BY_NAME:
             DbgPrint("[NAK] :: [ ] Hide process\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
@@ -153,7 +169,7 @@ DriverEntry(
     _In_ PDRIVER_OBJECT     DriverObject,
     _In_ PUNICODE_STRING    /* RegistryPath */
 ) {
-    DbgPrint("[NAK] :: [ ] Hello from Kernel, setup a few things\n");
+    DbgPrint("[NAK] :: [ ] Hello from Kernel, setup a few things. Modified test\n");
 
     NTSTATUS returnStatus = STATUS_SUCCESS;
     UNICODE_STRING ntUnicodeString;
