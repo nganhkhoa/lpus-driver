@@ -182,6 +182,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
                     break;
                 }
                 RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, derefAddr->size);
+                ZwUnmapViewOfSection((HANDLE)-1, mappedBuffer);
 
             }
 
