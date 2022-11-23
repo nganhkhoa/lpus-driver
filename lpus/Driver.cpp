@@ -38,6 +38,9 @@ ULONG64 largePageTableOffset = 0;
 ULONG64 largePageSizeOffset = 0;
 ULONG64 poolChunkSize = 0;
 
+// Handle to physical memory
+HANDLE physicalMemHandle = nullptr;
+
 NTSTATUS
 DriverCreateClose(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
     PAGED_CODE();
@@ -65,6 +68,9 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
     PDEREF_ADDR derefAddr = nullptr;
     PSCAN_RANGE scanRange = nullptr;
     PHIDE_PROCESS processHide = nullptr;
+
+    //Variable for dereferencing paging structure
+    //PVOID paging_struct_vaddr = nullptr;
 
     PAGED_CODE();
 
@@ -133,7 +139,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             RtlCopyBytes((PVOID)outputData, (PVOID)derefAddr->addr, (SIZE_T)derefAddr->size);
             break;
 
-        case DEREFERENCE_PHYSICAL_ADDRESS:
+        case DEREFERENCE_PAGING_STRUCTURE:
             DbgPrint("[NAK] :: [ ] Deref physical address\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             derefAddr = &(inputData->derefAddr);
@@ -145,7 +151,40 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             SIZE_T NumberOfBytesTransferred;
 
             MmCopyMemory((PVOID)outputData, copy_addr, derefAddr->size, MM_COPY_MEMORY_PHYSICAL, &NumberOfBytesTransferred);*/
-            DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", NumberOfBytesTransferred, derefAddr->addr);
+            //DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", NumberOfBytesTransferred, derefAddr->addr);
+
+            // Following WinPmem
+            // The page tables is always mapped in the direct Kernel memory map (not sure is this the same thing as the kernel space in every process)
+            // Doesn't work
+            /*PHYSICAL_ADDRESS phys_address;
+            phys_address.QuadPart = derefAddr->addr;
+            paging_struct_vaddr = MmGetVirtualForPhysical(phys_address);
+            DbgPrint("[NAK] :: [ ] Virtual address of paging structure: %llx from physical %llx\n", paging_struct_vaddr, derefAddr->addr);
+            RtlCopyMemory((PVOID)outputData, paging_struct_vaddr, (SIZE_T)derefAddr->size);
+            DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONG*)paging_struct_vaddr, derefAddr->addr);*/
+
+            if (openPhysicalMem() == STATUS_SUCCESS){
+
+                LARGE_INTEGER offset;
+                offset.QuadPart = derefAddr->addr;
+                SIZE_T viewSize = PAGE_SIZE;
+
+                ULONG page_offset = offset.QuadPart % PAGE_SIZE;
+
+
+                PVOID mappedBuffer = nullptr;
+                ntStatus = ZwMapViewOfSection(physicalMemHandle, (HANDLE)-1, &mappedBuffer, 0, PAGE_SIZE, 
+                               &offset, &viewSize, ViewUnmap, 0, PAGE_READONLY);
+
+                if ((ntStatus != STATUS_SUCCESS) || (!mappedBuffer))
+                {
+                    DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus); // real error
+                    break;
+                }
+                RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, derefAddr->size);
+
+            }
+
             break;
 
         case HIDE_PROCESS_BY_NAME:
@@ -290,6 +329,10 @@ UnloadRoutine(_In_ PDRIVER_OBJECT DriverObject) {
         IoDeleteDevice(deviceObject);
     }
 
+    if (physicalMemHandle != nullptr) {
+        ZwClose(physicalMemHandle);
+    }
+
     DbgPrint("[NAK] :: [+] Goodbye from Kernel\n");
 }
 
@@ -371,4 +414,33 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
         return p.addr;
     }
     return (PVOID)endAddress;
+}
+
+
+NTSTATUS openPhysicalMem() {
+    NTSTATUS ntStatus = STATUS_SUCCESS;
+    if (physicalMemHandle == nullptr) {
+        UNICODE_STRING ObjectNameUs;
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        //HANDLE SectionHandle;
+
+        RtlInitUnicodeString(&ObjectNameUs, L"\\Device\\PhysicalMemory");
+
+        InitializeObjectAttributes(&ObjectAttributes,
+            &ObjectNameUs,
+            OBJ_CASE_INSENSITIVE,
+            (HANDLE)NULL,
+            (PSECURITY_DESCRIPTOR)NULL);
+
+        ntStatus = ZwOpenSection(
+            &physicalMemHandle, SECTION_ALL_ACCESS, &ObjectAttributes);
+
+        if (!NT_SUCCESS(ntStatus))
+        {
+            DbgPrint("ERROR: ZwOpenSection Failed\n");
+            DbgPrint(" ---> NTSTATUS: 0x%lX\n", ntStatus);
+            return ntStatus;
+        }
+    }
+    return ntStatus;
 }

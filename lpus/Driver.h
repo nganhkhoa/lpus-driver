@@ -51,4 +51,6 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag);
 VOID
 hideProcess(CHAR* name, ULONG64 size);
 
+NTSTATUS
+openPhysicalMem();
 #endif
