@@ -139,7 +139,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             RtlCopyBytes((PVOID)outputData, (PVOID)derefAddr->addr, (SIZE_T)derefAddr->size);
             break;
 
-        case DEREFERENCE_PAGING_STRUCTURE:
+        case DEREFERENCE_PHYSICAL_ADDRESS:
             DbgPrint("[NAK] :: [ ] Deref physical address\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             derefAddr = &(inputData->derefAddr);
