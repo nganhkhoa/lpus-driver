@@ -145,17 +145,19 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             derefAddr = &(inputData->derefAddr);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
 
-            //Only usable after Windows 8.1, this needs to work on Windows 7
+            // Method 1: Using MmCopyMemory with MM_COPY_MEMORY_PHYSICAL flag
+            //Only usable after Windows 8.1, also cannot compiled using 
             /*_MM_COPY_ADDRESS copy_addr;
             copy_addr.PhysicalAddress.QuadPart = derefAddr->addr;
             SIZE_T NumberOfBytesTransferred;
-
             MmCopyMemory((PVOID)outputData, copy_addr, derefAddr->size, MM_COPY_MEMORY_PHYSICAL, &NumberOfBytesTransferred);*/
             //DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", NumberOfBytesTransferred, derefAddr->addr);
 
+            // Method 2: Using MmGetVirtualForPhysical
             // Following WinPmem
             // The page tables is always mapped in the direct Kernel memory map (not sure is this the same thing as the kernel space in every process)
             // Work for windows 10 and 11
+            // Sometimes gives wrong result for some reason
             /*PHYSICAL_ADDRESS phys_address;
             phys_address.QuadPart = derefAddr->addr;
             paging_struct_vaddr = MmGetVirtualForPhysical(phys_address);
@@ -163,7 +165,8 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             RtlCopyMemory((PVOID)outputData, paging_struct_vaddr, (SIZE_T)derefAddr->size);
             DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)paging_struct_vaddr, derefAddr->addr);*/
 
-            // Manually map physical memory to kernel space --> work well for windows 7
+            // Method 3: Manually map physical memory to kernel space --> work well for windows 7
+            // Crash when reading big array
             if (openPhysicalMem() == STATUS_SUCCESS){
 
                 LARGE_INTEGER offset;
@@ -174,19 +177,35 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
 
 
                 PVOID mappedBuffer = nullptr;
-                ntStatus = ZwMapViewOfSection(physicalMemHandle, (HANDLE)-1, &mappedBuffer, 0, PAGE_SIZE, 
-                               &offset, &viewSize, ViewUnmap, 0, PAGE_READONLY);
+                ntStatus = ZwMapViewOfSection(physicalMemHandle, ZwCurrentProcess(), &mappedBuffer, 0, PAGE_SIZE, 
+                               &offset, &viewSize, ViewUnmap, 0, PAGE_READWRITE);
 
                 if ((ntStatus != STATUS_SUCCESS) || (!mappedBuffer))
                 {
-                    DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus); // real error
+                    DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus);
                     break;
                 }
-                RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, derefAddr->size);
-                DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
+                RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, (SIZE_T)derefAddr->size);
+                //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
                 ZwUnmapViewOfSection((HANDLE)-1, mappedBuffer);
 
             }
+
+            // Method 4: using MmMapIoSpace, not working
+            /*PHYSICAL_ADDRESS phys_address;
+            PVOID vaddr;
+            phys_address.QuadPart = derefAddr->addr;
+            vaddr = MmMapIoSpace(phys_address, derefAddr->size, MmCached);
+            if (vaddr == NULL) {
+                DbgPrint("[NAK] :: [ ] Mapping failed.");
+            }
+            else {
+                DbgPrint("[NAK] :: [ ] Virtual address of paging structure: %llx from physical %llx\n", vaddr, derefAddr->addr);
+                RtlCopyMemory((PVOID)outputData, vaddr, (SIZE_T)derefAddr->size);
+            }*/
+            
+            //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)vaddr, derefAddr->addr);
+
             break;
 
         case HIDE_PROCESS_BY_NAME:
@@ -420,6 +439,7 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
 
 
 NTSTATUS openPhysicalMem() {
+    // Following: https://github.com/Velocidex/WinPmem/blob/e503038acfa3f4d3469341f6e126ef2958c342c3/kernel/read.c#L57
     NTSTATUS ntStatus = STATUS_SUCCESS;
     if (physicalMemHandle == nullptr) {
         UNICODE_STRING ObjectNameUs;
