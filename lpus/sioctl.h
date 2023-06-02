@@ -51,6 +51,9 @@ Environment:
 #define HIDE_PROCESS_BY_NAME \
     CTL_CODE(SIOCTL_TYPE, 0xA02, METHOD_IN_DIRECT, FILE_ANY_ACCESS)
 
+#define GET_PTE_BASE_ADDRESS \
+    CTL_CODE(SIOCTL_TYPE, 0xB01, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+
 
 #define DRIVER_FUNC_INSTALL     0x01
 #define DRIVER_FUNC_REMOVE      0x02
@@ -70,6 +73,7 @@ typedef struct _OFFSET_VALUE {
     ULONG64 largePageTableOffset;
     ULONG64 largePageSizeOffset;
     ULONG64 poolChunkSize;
+    ULONG64 functionMiGetPteAddressOffset;
 } OFFSET_VALUES, *POFFSET_VALUE;
 
 typedef struct _DEREF_ADDR {
