@@ -184,16 +184,19 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
 
                 PVOID mappedBuffer = nullptr;
                 ntStatus = ZwMapViewOfSection(physicalMemHandle, ZwCurrentProcess(), &mappedBuffer, 0, PAGE_SIZE, 
-                               &offset, &viewSize, ViewUnmap, 0, PAGE_READWRITE);
+                               &offset, &viewSize, ViewUnmap, 0, PAGE_READONLY);
 
                 if ((ntStatus != STATUS_SUCCESS) || (!mappedBuffer))
                 {
                     DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus);
-                    break;
+                    RtlZeroMemory((BYTE*)outputData, (SIZE_T)derefAddr->size);
                 }
-                RtlCopyMemory((PVOID)outputData, (BYTE*)mappedBuffer + page_offset, (SIZE_T)derefAddr->size);
-                //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
-                ZwUnmapViewOfSection(ZwCurrentProcess(), mappedBuffer);
+                else {
+                    RtlCopyMemory((BYTE*)outputData, (BYTE*)mappedBuffer + page_offset, (SIZE_T)derefAddr->size);
+                    //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
+                    ZwUnmapViewOfSection(ZwCurrentProcess(), mappedBuffer);
+
+                }
             }
             //MmUnmapLockedPages(outputData, Irp->MdlAddress);
 
@@ -229,9 +232,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             ULONG64 pteBase;
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);           
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
-            printf("Got the MiGetPteAddressOffset: 0x%lld", MiGetPteAddressOffset);
             pteBase = *(ULONG64*)((ULONG64)ntosbase + MiGetPteAddressOffset + 0x13);
-            printf("Got the PTE base: 0x%p", pteBase);
             outputData->ulong64Value = pteBase;
             break;
 
