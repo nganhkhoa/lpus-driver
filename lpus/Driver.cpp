@@ -37,6 +37,14 @@ ULONG64 lastVaOffset = 0;
 ULONG64 largePageTableOffset = 0;
 ULONG64 largePageSizeOffset = 0;
 ULONG64 poolChunkSize = 0;
+ULONG64 MiGetPteAddressOffset = 0;
+
+
+// Handle to physical memory
+HANDLE physicalMemHandle = nullptr;
+
+// Offset of internal function, parsed from PDB in front end
+//ULONG64 MiGetPteAddress = 0;
 
 NTSTATUS
 DriverCreateClose(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
@@ -65,6 +73,9 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
     PDEREF_ADDR derefAddr = nullptr;
     PSCAN_RANGE scanRange = nullptr;
     PHIDE_PROCESS processHide = nullptr;
+
+    //Variable for dereferencing paging structure
+    //PVOID paging_struct_vaddr = nullptr;
 
     PAGED_CODE();
 
@@ -96,6 +107,7 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             largePageTableOffset = offsetValues->largePageTableOffset;
             largePageSizeOffset  = offsetValues->largePageSizeOffset;
             poolChunkSize        = offsetValues->poolChunkSize;
+            MiGetPteAddressOffset      = offsetValues->functionMiGetPteAddressOffset;
             setup();
             break;
         case GET_KERNEL_BASE:
@@ -125,13 +137,86 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             DbgPrint("[NAK] :: Found: %llx\n", (outputData->poolChunk).addr);
             break;
         case DEREFERENCE_ADDRESS:
-            // DbgPrint("[NAK] :: [ ] Deref address\n");
+            //DbgPrint("[NAK] :: [ ] Deref address\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
             derefAddr = &(inputData->derefAddr);
             outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
-            // DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
+            //DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", derefAddr->size, derefAddr->addr);
             RtlCopyBytes((PVOID)outputData, (PVOID)derefAddr->addr, (SIZE_T)derefAddr->size);
             break;
+
+        case DEREFERENCE_PHYSICAL_ADDRESS:
+            DbgPrint("[NAK] :: [ ] Deref physical address\n");
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
+            derefAddr = &(inputData->derefAddr);
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+
+            // Method 1: Using MmCopyMemory with MM_COPY_MEMORY_PHYSICAL flag
+            //Only usable after Windows 8.1, also cannot compiled using 
+            /*_MM_COPY_ADDRESS copy_addr;
+            copy_addr.PhysicalAddress.QuadPart = derefAddr->addr;
+            SIZE_T NumberOfBytesTransferred;
+            MmCopyMemory((PVOID)outputData, copy_addr, derefAddr->size, MM_COPY_MEMORY_PHYSICAL, &NumberOfBytesTransferred);*/
+            //DbgPrint("[NAK] :: [ ] Deref %llu bytes from %llx\n", NumberOfBytesTransferred, derefAddr->addr);
+
+            // Method 2: Using MmGetVirtualForPhysical
+            // Following WinPmem
+            // The page tables is always mapped in the direct Kernel memory map (not sure is this the same thing as the kernel space in every process)
+            // Work for windows 10 and 11
+            // Sometimes gives wrong result for some reason
+            /*PHYSICAL_ADDRESS phys_address;
+            phys_address.QuadPart = derefAddr->addr;
+            paging_struct_vaddr = MmGetVirtualForPhysical(phys_address);
+            DbgPrint("[NAK] :: [ ] Virtual address of paging structure: %llx from physical %llx\n", paging_struct_vaddr, derefAddr->addr);
+            RtlCopyMemory((PVOID)outputData, paging_struct_vaddr, (SIZE_T)derefAddr->size);
+            DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)paging_struct_vaddr, derefAddr->addr);*/
+
+            // Method 3: Manually map physical memory to kernel space --> work well for windows 7
+            // Crash when reading big array
+            if (openPhysicalMem() == STATUS_SUCCESS){
+
+                LARGE_INTEGER offset;
+                offset.QuadPart = derefAddr->addr;
+                SIZE_T viewSize = PAGE_SIZE;
+
+                ULONG page_offset = offset.QuadPart % PAGE_SIZE;
+
+
+                PVOID mappedBuffer = nullptr;
+                ntStatus = ZwMapViewOfSection(physicalMemHandle, ZwCurrentProcess(), &mappedBuffer, 0, PAGE_SIZE, 
+                               &offset, &viewSize, ViewUnmap, 0, PAGE_READONLY);
+
+                if ((ntStatus != STATUS_SUCCESS) || (!mappedBuffer))
+                {
+                    DbgPrint("Error: ZwMapViewOfSection failed. Offset 0x%llX, status %08x.\n", offset.QuadPart, ntStatus);
+                    RtlZeroMemory((BYTE*)outputData, (SIZE_T)derefAddr->size);
+                }
+                else {
+                    RtlCopyMemory((BYTE*)outputData, (BYTE*)mappedBuffer + page_offset, (SIZE_T)derefAddr->size);
+                    //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)outputData, derefAddr->addr);
+                    ZwUnmapViewOfSection(ZwCurrentProcess(), mappedBuffer);
+
+                }
+            }
+            //MmUnmapLockedPages(outputData, Irp->MdlAddress);
+
+            // Method 4: using MmMapIoSpace, not working
+            /*PHYSICAL_ADDRESS phys_address;
+            PVOID vaddr;
+            phys_address.QuadPart = derefAddr->addr;
+            vaddr = MmMapIoSpace(phys_address, derefAddr->size, MmCached);
+            if (vaddr == NULL) {
+                DbgPrint("[NAK] :: [ ] Mapping failed.");
+            }
+            else {
+                DbgPrint("[NAK] :: [ ] Virtual address of paging structure: %llx from physical %llx\n", vaddr, derefAddr->addr);
+                RtlCopyMemory((PVOID)outputData, vaddr, (SIZE_T)derefAddr->size);
+            }*/
+            
+            //DbgPrint("[NAK] :: [ ] Content of paging structure: %llx from physical %llx\n", *(ULONGLONG*)vaddr, derefAddr->addr);
+
+            break;
+
         case HIDE_PROCESS_BY_NAME:
             DbgPrint("[NAK] :: [ ] Hide process\n");
             inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);
@@ -139,6 +224,18 @@ DriverControl(PDEVICE_OBJECT /* DriverObject */, PIRP Irp) {
             DbgPrint("[NAK] :: [ ] Hide process name: [%15s]; size: %llu\n", processHide->name, processHide->size);
             hideProcess(processHide->name, processHide->size);
             break;
+
+        case GET_PTE_BASE_ADDRESS:
+            // Get the base address (in virtual address) of the PTE self-mapping table
+            // DO NOT run this before the GET_KERNEL_BASE signal (since it depends of the kernel base)
+
+            ULONG64 pteBase;
+            inputData = (PINPUT_DATA)(Irp->AssociatedIrp.SystemBuffer);           
+            outputData = (POUTPUT_DATA)MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+            pteBase = *(ULONG64*)((ULONG64)ntosbase + MiGetPteAddressOffset + 0x13);
+            outputData->ulong64Value = pteBase;
+            break;
+
         default:
             break;
     }
@@ -153,7 +250,7 @@ DriverEntry(
     _In_ PDRIVER_OBJECT     DriverObject,
     _In_ PUNICODE_STRING    /* RegistryPath */
 ) {
-    DbgPrint("[NAK] :: [ ] Hello from Kernel, setup a few things\n");
+    DbgPrint("[NAK] :: [ ] Hello from Kernel, setup a few things. Modified test\n");
 
     NTSTATUS returnStatus = STATUS_SUCCESS;
     UNICODE_STRING ntUnicodeString;
@@ -274,6 +371,10 @@ UnloadRoutine(_In_ PDRIVER_OBJECT DriverObject) {
         IoDeleteDevice(deviceObject);
     }
 
+    if (physicalMemHandle != nullptr) {
+        ZwClose(physicalMemHandle);
+    }
+
     DbgPrint("[NAK] :: [+] Goodbye from Kernel\n");
 }
 
@@ -355,4 +456,34 @@ scanRemote(ULONG64 startAddress, ULONG64 endAddress, ULONG tag) {
         return p.addr;
     }
     return (PVOID)endAddress;
+}
+
+
+NTSTATUS openPhysicalMem() {
+    // Following: https://github.com/Velocidex/WinPmem/blob/e503038acfa3f4d3469341f6e126ef2958c342c3/kernel/read.c#L57
+    NTSTATUS ntStatus = STATUS_SUCCESS;
+    if (physicalMemHandle == nullptr) {
+        UNICODE_STRING ObjectNameUs;
+        OBJECT_ATTRIBUTES ObjectAttributes;
+        //HANDLE SectionHandle;
+
+        RtlInitUnicodeString(&ObjectNameUs, L"\\Device\\PhysicalMemory");
+
+        InitializeObjectAttributes(&ObjectAttributes,
+            &ObjectNameUs,
+            OBJ_CASE_INSENSITIVE,
+            (HANDLE)NULL,
+            (PSECURITY_DESCRIPTOR)NULL);
+
+        ntStatus = ZwOpenSection(
+            &physicalMemHandle, SECTION_ALL_ACCESS, &ObjectAttributes);
+
+        if (!NT_SUCCESS(ntStatus))
+        {
+            DbgPrint("ERROR: ZwOpenSection Failed\n");
+            DbgPrint(" ---> NTSTATUS: 0x%lX\n", ntStatus);
+            return ntStatus;
+        }
+    }
+    return ntStatus;
 }
